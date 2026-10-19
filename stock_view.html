@@ -434,6 +434,14 @@ function orderModeLabel(order){
   return order.mode;
 }
 
+// 取消のとき「在庫も戻す」で戻す個数。共通品・個人品の数量指定は発注数、個人品の○（全数）・日付は依頼数量
+function restoreQtyFor(order, itemType, stockRow){
+  if(!order) return 0;
+  if(itemType === 'common' || order.mode === '数量') return order.qty || 0;
+  const dInfo = stockRow ? dateInfoCache[stockRow.request_item_date_id] : null;
+  return (dInfo && dInfo.qty > 0) ? dInfo.qty : 0;
+}
+
 // 確定済みの数量指定の発注の合計（個人依頼品の「残り数量」の計算に使う。DB側の合計チェックと同じ数え方）
 function finalizedQtySum(stockItemId){
   return (finalizedOrdersCache[stockItemId] || [])
@@ -659,12 +667,13 @@ function openOrderSheet(stockItemId, itemType, teamId){
     const finList = (finalizedOrdersCache[stockItemId] || []).filter(o => itemType === 'common' ? o.team_id === teamId : true);
     if(finList.length){
       finalizedHtml = `<div class="order-status-note proxy">確定済みの発注の取消（管理者のみ）。実物が戻った場合は「在庫も戻す」、戻らない場合は「在庫は戻さない」を選んでください。</div>` + finList.map(o => {
-        const canRestore = o.qty > 0 && (itemType === 'common' || o.mode === '数量');
+        const restoreQty = restoreQtyFor(o, itemType, stockItemsCache.find(r => r.id === stockItemId));
+        const canRestore = restoreQty > 0;
         return `
         <div style="margin-bottom:10px">
           <div style="font-size:12.5px;margin-bottom:4px">${escapeHtml(orderModeLabel(o))}　${escapeHtml(o.operated_by_name || '')}さん</div>
           <div style="display:flex;gap:8px">
-            ${canRestore ? `<button class="btn-cancel-order-link" style="flex:1;margin-top:0;padding:7px 6px" onclick="cancelFinalizedOrder('${o.id}', true)">取消（在庫も${o.qty}個戻す）</button>` : ''}
+            ${canRestore ? `<button class="btn-cancel-order-link" style="flex:1;margin-top:0;padding:7px 6px" onclick="cancelFinalizedOrder('${o.id}', true)">取消（在庫も${restoreQty}個戻す）</button>` : ''}
             <button class="btn-cancel-order-link" style="flex:1;margin-top:0;padding:7px 6px" onclick="cancelFinalizedOrder('${o.id}', false)">取消（在庫は戻さない）</button>
           </div>
         </div>`;
@@ -713,7 +722,8 @@ function openOrderSheet(stockItemId, itemType, teamId){
     const qtyGroupVisible = isCommon ? true : (initialMode === '数量');
     const dateGroupVisible = initialMode === '日付';
     const colorGroupVisible = !isCommon && initialMode !== '日付';
-    const qtyInitialVal = (existing && existing.mode === '数量') ? existing.qty : '';
+    const qtyInitialVal = (isCommon && existing && existing.mode === '数量') ? existing.qty : '';
+    const qtyLabelText = (!isCommon && existing && existing.mode === '数量') ? '追加する数量' : '数量';
     const dateInitialVal = (existing && existing.mode === '日付' && existing.desired_date) ? existing.desired_date : '';
     const firstWaveChecked = existing && existing.is_first_wave ? 'checked' : '';
     const defaultColorId = (colorMasterCache.find(c => c.color_name === '黒') || colorMasterCache[0] || {}).id || null;
@@ -732,7 +742,7 @@ function openOrderSheet(stockItemId, itemType, teamId){
     document.getElementById('order-sheet-form').innerHTML = `
       ${modeRowHtml}
       <div class="field-group" id="order-qty-group" style="display:${qtyGroupVisible ? '' : 'none'}">
-        <label class="field-label">数量</label>
+        <label class="field-label">${qtyLabelText}</label>
         <input type="number" id="order-qty-input" min="1" max="${qtyMax}" value="${qtyInitialVal}">
       </div>
       <div class="field-group" id="order-date-group" style="display:${dateGroupVisible ? '' : 'none'}">
@@ -966,9 +976,10 @@ async function cancelFinalizedOrder(orderId, restoreStock){
   const msgEl = document.getElementById('order-sheet-msg');
   if(!target || !stockRow) return;
 
-  const doRestore = restoreStock === true && target.qty > 0 && (itemType === 'common' || target.mode === '数量');
+  const restoreQty = restoreQtyFor(target, itemType, stockRow);
+  const doRestore = restoreStock === true && restoreQty > 0;
   const confirmText = doRestore
-    ? '確定済みの発注（' + orderModeLabel(target) + '）を取消し、在庫数を' + target.qty + '個戻しますか？'
+    ? '確定済みの発注（' + orderModeLabel(target) + '）を取消し、在庫数を' + restoreQty + '個戻しますか？'
     : '確定済みの発注（' + orderModeLabel(target) + '）を取消しますか？\n在庫数は戻しません。';
   if(!confirm(confirmText)) return;
 
@@ -983,8 +994,8 @@ async function cancelFinalizedOrder(orderId, restoreStock){
   // 在庫を戻す（管理者が「在庫も戻す」を選んだ時だけ）。個人品と共通品で、使うDBの関数が違う
   if(doRestore){
     const { error: restoreErr } = itemType === 'common'
-      ? await sbClient.rpc('adjust_stock_qty', { p_stock_item_id: stockItemId, p_delta: -target.qty, p_action: 'cancel' })
-      : await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: target.qty });
+      ? await sbClient.rpc('adjust_stock_qty', { p_stock_item_id: stockItemId, p_delta: -restoreQty, p_action: 'cancel' })
+      : await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: restoreQty });
     if(restoreErr){
       alert('発注は取消しましたが、在庫数を戻す処理に失敗しました。在庫数は変わっていません。\n（' + restoreErr.message + '）');
     }
