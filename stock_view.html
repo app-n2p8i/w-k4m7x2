@@ -666,9 +666,9 @@ function openOrderSheet(stockItemId, itemType, teamId){
   if(currentUser.role === '管理者'){
     const finList = (finalizedOrdersCache[stockItemId] || []).filter(o => itemType === 'common' ? o.team_id === teamId : true);
     if(finList.length){
-      finalizedHtml = `<div class="order-status-note proxy">確定済みの発注の取消（管理者のみ）。実物が戻った場合は「在庫も戻す」、戻らない場合は「在庫は戻さない」を選んでください。</div>` + finList.map(o => {
+      finalizedHtml = `<div class="order-status-note proxy">確定済みの発注の取消（管理者のみ）。${itemType === 'common' ? '共通品は取消しても在庫数は変わりません。数を直す時は、補充（＋・−）で調整してください。' : '実物が戻った場合は「在庫も戻す」、戻らない場合は「在庫は戻さない」を選んでください。'}</div>` + finList.map(o => {
         const restoreQty = restoreQtyFor(o, itemType, stockItemsCache.find(r => r.id === stockItemId));
-        const canRestore = restoreQty > 0;
+        const canRestore = itemType !== 'common' && restoreQty > 0;
         return `
         <div style="margin-bottom:10px">
           <div style="font-size:12.5px;margin-bottom:4px">${escapeHtml(orderModeLabel(o))}　${escapeHtml(o.operated_by_name || '')}さん</div>
@@ -977,7 +977,7 @@ async function cancelFinalizedOrder(orderId, restoreStock){
   if(!target || !stockRow) return;
 
   const restoreQty = restoreQtyFor(target, itemType, stockRow);
-  const doRestore = restoreStock === true && restoreQty > 0;
+  const doRestore = restoreStock === true && restoreQty > 0 && itemType !== 'common';
   const confirmText = doRestore
     ? '確定済みの発注（' + orderModeLabel(target) + '）を取消し、在庫数を' + restoreQty + '個戻しますか？'
     : '確定済みの発注（' + orderModeLabel(target) + '）を取消しますか？\n在庫数は戻しません。';
@@ -991,11 +991,9 @@ async function cancelFinalizedOrder(orderId, restoreStock){
   const exFin = historyExtras(stockRow);
   await logChange('stock_orders', orderId, 'is_canceled', false, true, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
 
-  // 在庫を戻す（管理者が「在庫も戻す」を選んだ時だけ）。個人品と共通品で、使うDBの関数が違う
+  // 在庫を戻す（管理者が「在庫も戻す」を選んだ時だけ）。個人品だけ（共通品は在庫を自動では戻さず、管理者が補充で調整する）
   if(doRestore){
-    const { error: restoreErr } = itemType === 'common'
-      ? await sbClient.rpc('restore_common_stock_by_order', { p_order_id: orderId })
-      : await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: restoreQty });
+    const { error: restoreErr } = await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: restoreQty });
     if(restoreErr){
       alert('発注は取消しましたが、在庫数を戻す処理に失敗しました。在庫数は変わっていません。\n（' + restoreErr.message + '）');
     }
