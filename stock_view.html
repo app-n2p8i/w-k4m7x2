@@ -663,7 +663,8 @@ function openOrderSheet(stockItemId, itemType, teamId){
 
   // 確定済みの発注の一覧（管理者だけ。確定後の取消はここからのみ）
   let finalizedHtml = '';
-  if(currentUser.role === '管理者'){
+  // 共通品は確定後に取消さない運用（数が違った時は管理者が補充で在庫を直す）ため、一覧を出さない
+  if(currentUser.role === '管理者' && itemType !== 'common'){
     const finList = (finalizedOrdersCache[stockItemId] || []).filter(o => itemType === 'common' ? o.team_id === teamId : true);
     if(finList.length){
       finalizedHtml = `<div class="order-status-note proxy">確定済みの発注の取消（管理者のみ）。${itemType === 'common' ? '' : '実物が戻った場合は「在庫も戻す」、戻らない場合は「在庫は戻さない」を選んでください。'}</div>` + finList.map(o => {
