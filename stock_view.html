@@ -859,7 +859,7 @@ async function submitOrder(){
   let commonStockDelta = 0;
   if(isCommon){
     const stockQty = stockRow?.stock_qty ?? 0;
-    const baseQtyForStock = existingOrderId ? (existingQty || 0) : 0;
+    const baseQtyForStock = (existingOrderId && existingMode === '数量' && mode === '数量') ? (existingQty || 0) : 0;
     commonStockDelta = qty - baseQtyForStock;
     if(commonStockDelta > stockQty){
       msgEl.textContent = `在庫数（${stockQty}個）を超えています。`;
@@ -896,6 +896,14 @@ async function submitOrder(){
       }
       // change_historyへの記録はupdate_stock_order_qty関数側で自動的に行われるため、ここでは呼ばない
     }
+  } else if(isCommon && existingOrderId && existingMode === '数量' && mode === '数量'){
+    // 共通品の数量変更：既存の発注の数量を直接書き換える（在庫の増減はDB側の自動処理が行う）
+    const { error: updErr } = await sbClient.rpc('update_common_order_qty', { p_order_id: existingOrderId, p_new_qty: qty, p_is_first_wave: isFirstWave });
+    if(updErr){
+      msgEl.textContent = '発注に失敗しました：' + updErr.message;
+      return;
+    }
+    // change_historyへの記録はupdate_common_order_qty関数側で自動的に行われるため、ここでは呼ばない
   } else {
     // 新規登録を先に行い、成功を確認してから既存の発注を取消す（モードが変わった場合、または○／日付の場合）
     const payload = {
@@ -944,15 +952,7 @@ async function submitOrder(){
     }
   }
 
-  // 共通品は発注確定と同時に在庫を引当減算する（DB側の関数で安全に引き算する）
-  if(isCommon && commonStockDelta !== 0){
-    // 数量を増やす時は'order'、自班の発注数を減らす時（差分がマイナス）は在庫を戻す操作なので'cancel'として渡す
-    const { error: stockErr } = await sbClient.rpc('adjust_stock_qty', { p_stock_item_id: stockItemId, p_delta: commonStockDelta, p_action: (commonStockDelta > 0 ? 'order' : 'cancel') });
-    if(stockErr){
-      msgEl.textContent = '発注は登録されましたが、在庫の更新に失敗しました（在庫が変動した可能性があります）。画面を更新して在庫数をご確認ください。';
-      return;
-    }
-  }
+  // 共通品の在庫の増減は、DB側の自動処理（発注の登録・数量変更・取消）が行う。画面からは在庫を直接増減しない
 
   // 個人品・数量モードは、依頼の合計数量に達するまで依頼側を「発注可能」のまま残す（部分発注）
   if(itemType === 'individual' && dateRowId){
@@ -994,7 +994,7 @@ async function cancelFinalizedOrder(orderId, restoreStock){
   // 在庫を戻す（管理者が「在庫も戻す」を選んだ時だけ）。個人品と共通品で、使うDBの関数が違う
   if(doRestore){
     const { error: restoreErr } = itemType === 'common'
-      ? await sbClient.rpc('adjust_stock_qty', { p_stock_item_id: stockItemId, p_delta: -restoreQty, p_action: 'cancel' })
+      ? await sbClient.rpc('restore_common_stock_by_order', { p_order_id: orderId })
       : await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: restoreQty });
     if(restoreErr){
       alert('発注は取消しましたが、在庫数を戻す処理に失敗しました。在庫数は変わっていません。\n（' + restoreErr.message + '）');
@@ -1071,13 +1071,7 @@ async function cancelOrder(){
     }
   }
 
-  // 共通品は発注時に引当減算しているため、取消時は在庫を戻す（DB側の関数で安全に足し戻す）
-  if(itemType === 'common' && orderSheetState.existingQty){
-    const { error: restoreErr } = await sbClient.rpc('adjust_stock_qty', { p_stock_item_id: stockItemId, p_delta: -orderSheetState.existingQty, p_action: 'cancel' });
-    if(restoreErr){
-      alert('発注は取消しましたが、在庫数を戻す処理に失敗しました。在庫数がずれている可能性があります。管理者にご連絡ください。\n（' + restoreErr.message + '）');
-    }
-  }
+  // 共通品の在庫は、取消した時にDB側の自動処理が戻す
 
   // 個人品の場合、依頼側のステータスを「発注可能」に戻す（マイページに反映させるため）
   if(itemType === 'individual' && stockRowCheck && stockRowCheck.request_item_date_id){
