@@ -658,11 +658,17 @@ function openOrderSheet(stockItemId, itemType, teamId){
   if(currentUser.role === '管理者'){
     const finList = (finalizedOrdersCache[stockItemId] || []).filter(o => itemType === 'common' ? o.team_id === teamId : true);
     if(finList.length){
-      finalizedHtml = `<div class="order-status-note proxy">確定済みの発注（取消しても在庫数は自動では戻りません）</div>` + finList.map(o => `
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <div style="flex:1;font-size:12.5px">${escapeHtml(orderModeLabel(o))}　${escapeHtml(o.operated_by_name || '')}さん</div>
-          <button class="btn-cancel-order-link" style="width:auto;margin-top:0;padding:7px 10px" onclick="cancelFinalizedOrder('${o.id}')">確定後の取消</button>
-        </div>`).join('');
+      finalizedHtml = `<div class="order-status-note proxy">確定済みの発注の取消（管理者のみ）。実物が戻った場合は「在庫も戻す」、戻らない場合は「在庫は戻さない」を選んでください。</div>` + finList.map(o => {
+        const canRestore = o.qty > 0 && (itemType === 'common' || o.mode === '数量');
+        return `
+        <div style="margin-bottom:10px">
+          <div style="font-size:12.5px;margin-bottom:4px">${escapeHtml(orderModeLabel(o))}　${escapeHtml(o.operated_by_name || '')}さん</div>
+          <div style="display:flex;gap:8px">
+            ${canRestore ? `<button class="btn-cancel-order-link" style="flex:1;margin-top:0;padding:7px 6px" onclick="cancelFinalizedOrder('${o.id}', true)">取消（在庫も${o.qty}個戻す）</button>` : ''}
+            <button class="btn-cancel-order-link" style="flex:1;margin-top:0;padding:7px 6px" onclick="cancelFinalizedOrder('${o.id}', false)">取消（在庫は戻さない）</button>
+          </div>
+        </div>`;
+      }).join('');
     }
   }
   document.getElementById('order-sheet-finalized').innerHTML = finalizedHtml;
@@ -952,7 +958,7 @@ async function submitOrder(){
 }
 
 // 確定済みの発注の取消（管理者のみ）。在庫数は自動では戻さない（実物が戻った時は管理者が手で直す）
-async function cancelFinalizedOrder(orderId){
+async function cancelFinalizedOrder(orderId, restoreStock){
   if(currentUser.role !== '管理者') return;
   const { stockItemId, itemType } = orderSheetState;
   const stockRow = stockItemsCache.find(r => r.id === stockItemId);
@@ -960,7 +966,11 @@ async function cancelFinalizedOrder(orderId){
   const msgEl = document.getElementById('order-sheet-msg');
   if(!target || !stockRow) return;
 
-  if(!confirm('確定済みの発注（' + orderModeLabel(target) + '）を取消しますか？\n在庫数は自動では戻りません。実物が戻った場合は、在庫数を手で直してください。')) return;
+  const doRestore = restoreStock === true && target.qty > 0 && (itemType === 'common' || target.mode === '数量');
+  const confirmText = doRestore
+    ? '確定済みの発注（' + orderModeLabel(target) + '）を取消し、在庫数を' + target.qty + '個戻しますか？'
+    : '確定済みの発注（' + orderModeLabel(target) + '）を取消しますか？\n在庫数は戻しません。';
+  if(!confirm(confirmText)) return;
 
   const { error } = await sbClient.from('stock_orders').update({ is_canceled: true }).eq('id', orderId);
   if(error){
@@ -969,6 +979,16 @@ async function cancelFinalizedOrder(orderId){
   }
   const exFin = historyExtras(stockRow);
   await logChange('stock_orders', orderId, 'is_canceled', false, true, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
+
+  // 在庫を戻す（管理者が「在庫も戻す」を選んだ時だけ）。個人品と共通品で、使うDBの関数が違う
+  if(doRestore){
+    const { error: restoreErr } = itemType === 'common'
+      ? await sbClient.rpc('adjust_stock_qty', { p_stock_item_id: stockItemId, p_delta: -target.qty, p_action: 'cancel' })
+      : await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: target.qty });
+    if(restoreErr){
+      alert('発注は取消しましたが、在庫数を戻す処理に失敗しました。在庫数は変わっていません。\n（' + restoreErr.message + '）');
+    }
+  }
 
   // 個人品：取消したあとに有効な発注が依頼数量に満たなければ、依頼側を「発注可能」に戻す
   if(itemType === 'individual' && stockRow.request_item_date_id){
