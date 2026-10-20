@@ -131,6 +131,10 @@ h1{font-size:18px;font-weight:bold;color:#1a3a5c;border-bottom:2px solid #1a3a5c
 
 /* 在庫データ削除確認シート（管理者・長押しのみ） */
 .btn-delete-confirm{width:100%;padding:12px;background:#c53030;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:bold;cursor:pointer}
+.admin-links{margin-top:12px;display:flex;flex-direction:column;gap:6px;align-items:center}
+.link-small{appearance:none;background:none;border:none;color:#666;font-size:12px;text-decoration:underline;cursor:pointer;padding:4px;font-family:inherit}
+.link-small.danger{color:#c53030}
+.btn-return{width:100%;padding:12px;background:#1a3a5c;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;margin-top:6px}
 .btn-close-sheet{width:100%;padding:10px;background:#fff;border:1px solid #999;color:#555;border-radius:6px;font-size:14px;cursor:pointer;margin-top:8px}
 .indiv-row.pressing,.ledger-row.common.pressing{box-shadow:0 0 0 2px #1a3a5c inset}
 @media (min-width:900px){
@@ -236,9 +240,9 @@ h1{font-size:18px;font-weight:bold;color:#1a3a5c;border-bottom:2px solid #1a3a5c
     <h2 id="order-sheet-title"></h2>
     <div class="sheet-sub" id="order-sheet-sub"></div>
     <div id="order-sheet-status"></div>
-    <div id="order-sheet-finalized"></div>
     <div id="order-sheet-form"></div>
     <div id="order-sheet-viewonly"></div>
+    <div id="order-sheet-finalized"></div>
     <div class="sheet-msg" id="order-sheet-msg"></div>
     <button class="btn-close-sheet" onclick="closeOrderSheet()">閉じる</button>
   </div>
@@ -653,35 +657,41 @@ function openOrderSheet(stockItemId, itemType, teamId){
     }
     if(itemType === 'individual' && activeOrders.length > 1){
       const unfinTotal = activeOrders.filter(o => o.mode === '数量').reduce((sum, o) => sum + (o.qty || 0), 0);
-      statusHtml += `<div class="order-status-note proxy">未確定の発注が${activeOrders.length}件あります（数量の合計${unfinTotal}個）。「取消す」は1件ずつ、古いものから取消されます。</div>`;
+      statusHtml += `<div class="order-status-note proxy">未配送の発注が${activeOrders.length}件あります（数量の合計${unfinTotal}個）。「取消す」は古いものから1件ずつ。</div>`;
     }
   } else if(itemType === 'individual' && finalizedQtySum(stockItemId) > 0 && orderSheetState.totalQty){
     const finQtyOnly = finalizedQtySum(stockItemId);
-    statusHtml = `<div class="order-status-note">確定済みの発注が${finQtyOnly}個あります。残り${Math.max(0, orderSheetState.totalQty - finQtyOnly)}個です。</div>`;
+    statusHtml = `<div class="order-status-note">配送済み ${finQtyOnly}個 / 未発注 ${Math.max(0, orderSheetState.totalQty - finQtyOnly)}個</div>`;
   }
   document.getElementById('order-sheet-status').innerHTML = statusHtml;
 
-  // 確定済みの発注の一覧（管理者だけ。確定後の取消はここからのみ）
-  let finalizedHtml = '';
-  // 共通品は確定後に取消さない運用（数が違った時は管理者が補充で在庫を直す）ため、一覧を出さない
-  if(currentUser.role === '管理者' && itemType !== 'common'){
-    const finList = (finalizedOrdersCache[stockItemId] || []).filter(o => itemType === 'common' ? o.team_id === teamId : true);
-    if(finList.length){
-      finalizedHtml = `<div class="order-status-note proxy">確定済みの発注の取消（管理者のみ）。${itemType === 'common' ? '' : '実物が戻った場合は「在庫も戻す」、戻らない場合は「在庫は戻さない」を選んでください。'}</div>` + finList.map(o => {
-        const restoreQty = restoreQtyFor(o, itemType, stockItemsCache.find(r => r.id === stockItemId));
-        const canRestore = itemType !== 'common' && restoreQty > 0;
-        return `
-        <div style="margin-bottom:10px">
-          <div style="font-size:12.5px;margin-bottom:4px">${escapeHtml(orderModeLabel(o))}　${escapeHtml(o.operated_by_name || '')}さん</div>
-          <div style="display:flex;gap:8px">
-            ${canRestore ? `<button class="btn-cancel-order-link" style="flex:1;margin-top:0;padding:7px 6px" onclick="cancelFinalizedOrder('${o.id}', true)">取消（在庫も${restoreQty}個戻す）</button>` : ''}
-            <button class="btn-cancel-order-link" style="flex:1;margin-top:0;padding:7px 6px" onclick="cancelFinalizedOrder('${o.id}', false)">${itemType === 'common' ? '取消' : '取消（在庫は戻さない）'}</button>
-          </div>
-        </div>`;
-      }).join('');
+  // 管理者だけの操作：配送済みの発注の取消・「戻ってきた」・非表示（個人品のみ。共通品は確定後に取消さない運用）
+  const hiddenAdminMode = currentUser.role === '管理者' && itemType === 'individual' && !!row.is_hidden;
+  let adminHtml = '';
+  if(currentUser.role === '管理者' && itemType === 'individual'){
+    const finList = finalizedOrdersCache[stockItemId] || [];
+    const restoreTotal = finList.reduce((sum, o) => sum + restoreQtyFor(o, itemType, row), 0);
+    const finLabel = (o) => o.mode === '数量' ? `${o.qty || 0}個` : '○（全数）';
+    const returnLabel = '戻ってきた' + (restoreTotal > 0 ? '（在庫に' + restoreTotal + '個戻す）' : '');
+    if(hiddenAdminMode){
+      // 消えている行：発注欄は出さず、「戻ってきた」だけ
+      adminHtml = finList.length
+        ? `<div class="order-status-note">配送済み：${finList.map(finLabel).join('、')}</div>
+           <button class="btn-return" onclick="returnItem()">${returnLabel}</button>`
+        : `<button class="btn-return" onclick="toggleHideStockItem(false)">非表示を解除する</button>`;
+    } else {
+      const links = [];
+      if(finList.length){
+        links.push(`<button class="link-small" onclick="returnItem()">${returnLabel} ▸</button>`);
+        finList.forEach(o => {
+          links.push(`<button class="link-small danger" onclick="cancelFinalizedOrder('${o.id}', false)">配送済み${finList.length > 1 ? '（' + finLabel(o) + '）' : ''}を取消・在庫は戻さない</button>`);
+        });
+      }
+      links.push(`<button class="link-small danger" onclick="toggleHideStockItem(true)">この品目を非表示にする</button>`);
+      adminHtml = `<div class="admin-links">${links.join('')}</div>`;
     }
   }
-  document.getElementById('order-sheet-finalized').innerHTML = finalizedHtml;
+  document.getElementById('order-sheet-finalized').innerHTML = adminHtml;
 
   document.getElementById('order-sheet-msg').textContent = '';
 
@@ -692,7 +702,10 @@ function openOrderSheet(stockItemId, itemType, teamId){
   const deliveredLocked = mark === 'delivered' && currentUser.role !== '管理者';
   const canEdit = canOperate && !blocked && !deliveredLocked && (itemType === 'common' || isSelfItem || currentUser.role === '管理者');
 
-  if(canEdit){
+  if(hiddenAdminMode){
+    document.getElementById('order-sheet-form').innerHTML = '';
+    document.getElementById('order-sheet-viewonly').innerHTML = '';
+  } else if(canEdit){
     const qtyBase = ((orderSheetState.existingMode === '数量') ? orderSheetState.existingQty : 0) + (itemType === 'individual' ? finalizedQtySum(stockItemId) : 0);
     const stockQty = row.stock_qty ?? 0;
     let qtyMax = orderSheetState.totalQty ? (orderSheetState.totalQty - qtyBase) : Infinity;
@@ -757,14 +770,8 @@ function openOrderSheet(stockItemId, itemType, teamId){
       </label>
       <div class="sheet-btns">
         <button class="btn-sheet-submit" onclick="submitOrder()">この内容で発注する</button>
-        <button class="btn-sheet-cancel" onclick="closeOrderSheet()">やめる</button>
       </div>
       ${existing ? `<button class="btn-cancel-order-link" onclick="cancelOrder()">この発注を取消す</button>` : ''}
-      ${(currentUser.role === '管理者' && itemType === 'individual')
-        ? (row.is_hidden
-            ? `<button class="btn-cancel-order-link" onclick="toggleHideStockItem(false)">非表示を解除する</button>`
-            : `<button class="btn-cancel-order-link" onclick="toggleHideStockItem(true)">この品目を非表示にする</button>`)
-        : ''}
     `;
     document.getElementById('order-sheet-viewonly').innerHTML = '';
   } else {
@@ -980,8 +987,8 @@ async function cancelFinalizedOrder(orderId, restoreStock){
   const restoreQty = restoreQtyFor(target, itemType, stockRow);
   const doRestore = restoreStock === true && restoreQty > 0 && itemType !== 'common';
   const confirmText = doRestore
-    ? '確定済みの発注（' + orderModeLabel(target) + '）を取消し、在庫数を' + restoreQty + '個戻しますか？'
-    : '確定済みの発注（' + orderModeLabel(target) + '）を取消しますか？' + (itemType === 'common' ? '' : '\n在庫数は戻しません。');
+    ? '配送済みの発注（' + orderModeLabel(target) + '）を取消し、在庫に' + restoreQty + '個戻しますか？'
+    : '配送済みの発注（' + orderModeLabel(target) + '）を取消しますか？' + (itemType === 'common' ? '' : '\n在庫には戻しません。');
   if(!confirm(confirmText)) return;
 
   const { error } = await sbClient.from('stock_orders').update({ is_canceled: true }).eq('id', orderId);
@@ -1023,6 +1030,75 @@ async function cancelFinalizedOrder(orderId, restoreStock){
 
   closeOrderSheet();
   await loadStockItems();
+}
+
+// 「戻ってきた」：配送済みの発注を取消し、在庫に戻し、消えていた行を表に戻す（管理者のみ・個人品のみ）
+async function returnItem(){
+  if(currentUser.role !== '管理者') return;
+  const { stockItemId, itemType } = orderSheetState;
+  if(itemType !== 'individual') return;
+  const stockRow = stockItemsCache.find(r => r.id === stockItemId);
+  const msgEl = document.getElementById('order-sheet-msg');
+  if(!stockRow) return;
+  const finList = finalizedOrdersCache[stockItemId] || [];
+  if(!finList.length) return;
+
+  const restoreTotal = finList.reduce((sum, o) => sum + restoreQtyFor(o, itemType, stockRow), 0);
+  const willUnhide = !!stockRow.is_hidden;
+  const confirmText = '配送済みの発注を取消し、在庫に' + restoreTotal + '個戻します。'
+    + (willUnhide ? '\n消えている行も表に戻します。' : '')
+    + '\nよろしいですか？';
+  if(!confirm(confirmText)) return;
+
+  const exFin = historyExtras(stockRow);
+  let restoreFailed = false;
+  for(const o of finList){
+    const { error } = await sbClient.from('stock_orders').update({ is_canceled: true }).eq('id', o.id);
+    if(error){
+      msgEl.textContent = '取消に失敗しました：' + error.message;
+      await loadStockItems();
+      return;
+    }
+    await logChange('stock_orders', o.id, 'is_canceled', false, true, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
+    const q = restoreQtyFor(o, itemType, stockRow);
+    if(q > 0){
+      const { error: restoreErr } = await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: q });
+      if(restoreErr){ restoreFailed = true; console.error('[戻ってきた] 在庫戻し失敗:', restoreErr.message); }
+    }
+  }
+
+  if(willUnhide){
+    const { error: hideErr } = await sbClient.from('stock_items').update({ is_hidden: false, hidden_at: null }).eq('id', stockItemId);
+    if(hideErr){
+      alert('発注の取消までは完了しましたが、非表示の解除に失敗しました。\n（' + hideErr.message + '）');
+    } else {
+      await logChange('stock_items', stockItemId, 'is_hidden', true, false, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
+    }
+  }
+
+  // 取消したあとに有効な発注が依頼数量に満たなければ、依頼側を「発注可能」に戻す（cancelFinalizedOrderと同じ判定）
+  if(stockRow.request_item_date_id){
+    const dInfo = dateInfoCache[stockRow.request_item_date_id];
+    const others = [...(ordersCache[stockItemId] || [])];
+    const hasFullOrder = others.some(o => o.mode !== '数量');
+    const othersQty = others.filter(o => o.mode === '数量').reduce((sum, o) => sum + (o.qty || 0), 0);
+    if(!hasFullOrder && (!dInfo || !dInfo.qty || othersQty < dInfo.qty)){
+      const { error: revertErr } = await sbClient
+        .from('request_item_dates')
+        .update({ status: '発注可能' })
+        .eq('id', stockRow.request_item_date_id)
+        .eq('status', '発注済み・受取待ち');
+      if(!revertErr){
+        await logChange('request_item_dates', stockRow.request_item_date_id, 'status', '発注済み・受取待ち', '発注可能', stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
+      }
+    }
+  }
+
+  closeOrderSheet();
+  await loadStockItems();
+  if(restoreFailed){
+    alert('発注は取消しましたが、在庫を戻す処理に失敗したものがあります。在庫数を確認してください。');
+  }
 }
 
 async function cancelOrder(){
