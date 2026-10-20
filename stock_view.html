@@ -134,6 +134,8 @@ h1{font-size:18px;font-weight:bold;color:#1a3a5c;border-bottom:2px solid #1a3a5c
 .admin-links{margin-top:12px;display:flex;flex-direction:column;gap:6px;align-items:center}
 .link-small{appearance:none;background:none;border:none;color:#666;font-size:12px;text-decoration:underline;cursor:pointer;padding:4px;font-family:inherit}
 .link-small.danger{color:#c53030}
+.return-qty-row{display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;color:#333;margin:6px 0}
+.return-qty-row input{width:70px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:16px;text-align:center;font-family:inherit}
 .btn-return{width:100%;padding:12px;background:#1a3a5c;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;margin-top:6px}
 .btn-close-sheet{width:100%;padding:10px;background:#fff;border:1px solid #999;color:#555;border-radius:6px;font-size:14px;cursor:pointer;margin-top:8px}
 .indiv-row.pressing,.ledger-row.common.pressing{box-shadow:0 0 0 2px #1a3a5c inset}
@@ -672,16 +674,23 @@ function openOrderSheet(stockItemId, itemType, teamId){
     const finList = finalizedOrdersCache[stockItemId] || [];
     const restoreTotal = finList.reduce((sum, o) => sum + restoreQtyFor(o, itemType, row), 0);
     const finLabel = (o) => o.mode === '数量' ? `${o.qty || 0}個` : '○（全数）';
-    const returnLabel = '戻ってきた' + (restoreTotal > 0 ? '（在庫に' + restoreTotal + '個戻す）' : '');
+    // 全部が数量指定の発注なら、戻ってきた個数を入力できる（一部だけ戻った場合用）。○（全数）が混ざる場合は全部戻す
+    const canPartial = restoreTotal > 0 && finList.every(o => o.mode === '数量');
+    const qtyRowHtml = canPartial
+      ? `<div class="return-qty-row">戻ってきた個数 <input type="number" id="return-qty-input" min="1" max="${restoreTotal}" value="${restoreTotal}"> 個</div>`
+      : '';
+    const returnLabel = '戻ってきた' + (!canPartial && restoreTotal > 0 ? '（在庫に' + restoreTotal + '個戻す）' : '');
     if(hiddenAdminMode){
       // 消えている行：発注欄は出さず、「戻ってきた」だけ
       adminHtml = finList.length
         ? `<div class="order-status-note">配送済み：${finList.map(finLabel).join('、')}</div>
+           ${qtyRowHtml}
            <button class="btn-return" onclick="returnItem()">${returnLabel}</button>`
         : `<button class="btn-return" onclick="toggleHideStockItem(false)">非表示を解除する</button>`;
     } else {
       const links = [];
       if(finList.length){
+        if(qtyRowHtml) links.push(qtyRowHtml);
         links.push(`<button class="link-small" onclick="returnItem()">${returnLabel} ▸</button>`);
         finList.forEach(o => {
           links.push(`<button class="link-small danger" onclick="cancelFinalizedOrder('${o.id}', false)">配送済み${finList.length > 1 ? '（' + finLabel(o) + '）' : ''}を取消・在庫は戻さない</button>`);
@@ -1045,13 +1054,28 @@ async function returnItem(){
 
   const restoreTotal = finList.reduce((sum, o) => sum + restoreQtyFor(o, itemType, stockRow), 0);
   const willUnhide = !!stockRow.is_hidden;
-  const confirmText = '配送済みの発注を取消し、在庫に' + restoreTotal + '個戻します。'
+
+  // 戻ってきた個数（入力欄がある時だけ。なければ全部戻す）
+  let returnQty = restoreTotal;
+  const qtyInput = document.getElementById('return-qty-input');
+  if(qtyInput){
+    const n = parseInt(qtyInput.value, 10);
+    if(!Number.isInteger(n) || n < 1 || n > restoreTotal){
+      msgEl.textContent = '戻ってきた個数は1〜' + restoreTotal + 'の数字で入力してください。';
+      return;
+    }
+    returnQty = n;
+  }
+  msgEl.textContent = '';
+  const confirmText = '配送済みの発注を取消し、在庫に' + returnQty + '個戻します。'
+    + (returnQty < restoreTotal ? '\n残り' + (restoreTotal - returnQty) + '個は配送先に残った扱いです（在庫には入りません）。' : '')
     + (willUnhide ? '\n消えている行も表に戻します。' : '')
     + '\nよろしいですか？';
   if(!confirm(confirmText)) return;
 
   const exFin = historyExtras(stockRow);
   let restoreFailed = false;
+  let remainingReturn = returnQty;
   for(const o of finList){
     const { error } = await sbClient.from('stock_orders').update({ is_canceled: true }).eq('id', o.id);
     if(error){
@@ -1060,8 +1084,9 @@ async function returnItem(){
       return;
     }
     await logChange('stock_orders', o.id, 'is_canceled', false, true, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
-    const q = restoreQtyFor(o, itemType, stockRow);
+    const q = Math.min(remainingReturn, restoreQtyFor(o, itemType, stockRow));
     if(q > 0){
+      remainingReturn -= q;
       const { error: restoreErr } = await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: q });
       if(restoreErr){ restoreFailed = true; console.error('[戻ってきた] 在庫戻し失敗:', restoreErr.message); }
     }
