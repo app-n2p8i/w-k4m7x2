@@ -338,6 +338,12 @@ function actionText(row){
   if(f === 'reflected_to_stock') return row.new_value === 'true' ? '在庫に反映' : '在庫反映を取消';
   if(f === 'stage1_done') return row.new_value === 'true' ? '工程Aを完了' : '工程Aを未完了に戻す';
   if(f === 'stage2_done') return row.new_value === 'true' ? '工程Bを完了' : '工程Bを未完了に戻す';
+  if(f === 'stock_qty'){
+    if(row.action_type === 'replenish') return '在庫数を調整';
+    if(row.action_type === 'cancel') return '在庫に戻した';
+    if(row.action_type === 'order') return '発注で在庫を引いた';
+    return '在庫数を変更';
+  }
   if(f === 'status') return '状態を変更';
   if(f === 'qty') return '数量を変更';
   if(f === 'is_hidden') return row.new_value === 'true' ? '品目を非表示に変更' : '品目を再表示';
@@ -347,7 +353,7 @@ function actionText(row){
 
 // before→afterを別行で見せる必要があるかどうか
 function needsChangeLine(field){
-  return ['status','qty','completed','reflected_to_stock','is_finalized','stage1_done','stage2_done','is_hidden'].includes(field)
+  return ['status','qty','stock_qty','completed','reflected_to_stock','is_finalized','stage1_done','stage2_done','is_hidden'].includes(field)
     || field.startsWith('delivery_marks.');
 }
 
@@ -454,7 +460,7 @@ function escapeOr(s){
 async function fetchRows(from, to){
   let q = sbClient
     .from('change_history')
-    .select('id, table_name, record_id, field_name, old_value, new_value, item_label, requester_name, delivery_date, size_text, changed_by_name, changed_by_email, changed_at')
+    .select('id, table_name, record_id, field_name, old_value, new_value, item_label, requester_name, delivery_date, size_text, action_type, changed_by_name, changed_by_email, changed_at')
     .gte('changed_at', `${from}T00:00:00+09:00`)
     .lte('changed_at', `${to}T23:59:59+09:00`)
     .order('changed_at', { ascending:false })
@@ -537,12 +543,24 @@ function isProxy(row){
   return roleByEmail.get(row.changed_by_email) === '管理者';
 }
 
+// 「5月12日の依頼分　依頼者：○○」（個人依頼品のみ。共通品や古い履歴には出ない）
+function requestInfoText(row){
+  const parts = [];
+  if(row.delivery_date){
+    const m = String(row.delivery_date).split('-');
+    if(m.length >= 3) parts.push(`${parseInt(m[1], 10)}月${parseInt(m[2], 10)}日の依頼分`);
+  }
+  if(row.requester_name) parts.push(`依頼者：${row.requester_name}`);
+  return parts.join('　');
+}
+
 function rowHtml(row){
   const type = rowType(row);
   const typeInfo = TYPE_LABELS[type] || { label:'その他', cls:'other' };
   const proxy = isProxy(row);
   const review = isReview(row);
   const target = (row.item_label || TABLE_LABELS[row.table_name] || '') + (row.size_text ? `（${row.size_text}）` : '');
+  const reqInfo = requestInfoText(row);
   const change = needsChangeLine(row.field_name)
     ? `<div class="d-change">${escapeHtml(valueText(row.field_name, row.old_value))}<span class="arrow">→</span>${escapeHtml(valueText(row.field_name, row.new_value))}</div>`
     : '';
@@ -559,6 +577,7 @@ function rowHtml(row){
           ${proxy ? '<span class="tag proxy">代理</span>' : ''}
           ${review ? '<span class="tag review">要確認</span>' : ''}
         </div>
+        ${reqInfo ? `<div style="font-size:11.5px;color:#666;margin-top:1px">${escapeHtml(reqInfo)}</div>` : ''}
         <div class="d-action">${escapeHtml(actionText(row))}</div>
         ${change}
       </div>
