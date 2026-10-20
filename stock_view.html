@@ -695,9 +695,6 @@ function openOrderSheet(stockItemId, itemType, teamId){
       if(finList.length){
         if(qtyRowHtml) links.push(qtyRowHtml);
         links.push(`<button class="link-small" onclick="returnItem()">${returnLabel} ▸</button>`);
-        finList.forEach(o => {
-          links.push(`<button class="link-small danger" onclick="cancelFinalizedOrder('${o.id}')">配送済み${finList.length > 1 ? '（' + finLabel(o) + '）' : ''}を取消・在庫は戻さない</button>`);
-        });
       }
       links.push(`<button class="link-small danger" onclick="toggleHideStockItem(true)">この品目を非表示にする</button>`);
       adminHtml = `<div class="admin-links">${links.join('')}</div>`;
@@ -993,33 +990,6 @@ let orderCancelBusy = false;
 function setOrderCancelBusy(flag){
   orderCancelBusy = flag;
   document.querySelectorAll('#order-sheet-finalized button').forEach(btn => { btn.disabled = flag; });
-}
-
-// 配送済みの発注を1件取消す（在庫には戻さない）。取消・「発注可能」への戻しはDB関数が1回の流れで行う
-async function cancelFinalizedOrder(orderId){
-  if(currentUser.role !== '管理者') return;
-  if(orderCancelBusy) return;
-  const { stockItemId, itemType } = orderSheetState;
-  if(itemType !== 'individual') return;
-  const stockRow = stockItemsCache.find(r => r.id === stockItemId);
-  const target = (finalizedOrdersCache[stockItemId] || []).find(o => o.id === orderId);
-  const msgEl = document.getElementById('order-sheet-msg');
-  if(!target || !stockRow) return;
-
-  if(!confirm('配送済みの発注（' + orderModeLabel(target) + '）を取消しますか？\n在庫には戻しません。')) return;
-
-  setOrderCancelBusy(true);
-  const { error } = await sbClient.rpc('return_individual_item', {
-    p_stock_item_id: stockItemId, p_return_qty: 0, p_order_id: orderId, p_unhide: false
-  });
-  if(error){
-    msgEl.textContent = '取消に失敗しました（何も変わっていません）：' + error.message;
-    setOrderCancelBusy(false);
-    return;
-  }
-  setOrderCancelBusy(false);
-  closeOrderSheet();
-  await loadStockItems();
 }
 
 // 「戻ってきた」：配送済みの発注を全部取消し、入力した個数を在庫に戻し、消えていた行を表に戻す（管理者のみ・個人品のみ）。全部DB関数が1回の流れで行う
