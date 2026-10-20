@@ -445,7 +445,10 @@ function restoreQtyFor(order, itemType, stockRow){
   if(!order) return 0;
   if(itemType === 'common' || order.mode === '数量') return order.qty || 0;
   const dInfo = stockRow ? dateInfoCache[stockRow.request_item_date_id] : null;
-  return (dInfo && dInfo.qty > 0) ? dInfo.qty : 0;
+  if(!(dInfo && dInfo.qty > 0)) return 0;
+  // ○（全数）は「依頼数量のうち、この発注の時点で残っていた分」なので、同じ品目の配送済み数量指定分は差し引く
+  const doneQty = stockRow ? finalizedQtySum(stockRow.id) : 0;
+  return Math.max(0, dInfo.qty - doneQty);
 }
 
 // 確定済みの数量指定の発注の合計（個人依頼品の「残り数量」の計算に使う。DB側の合計チェックと同じ数え方）
@@ -664,6 +667,10 @@ function openOrderSheet(stockItemId, itemType, teamId){
   } else if(itemType === 'individual' && finalizedQtySum(stockItemId) > 0 && orderSheetState.totalQty){
     const finQtyOnly = finalizedQtySum(stockItemId);
     statusHtml = `<div class="order-status-note">配送済み ${finQtyOnly}個 / 未発注 ${Math.max(0, orderSheetState.totalQty - finQtyOnly)}個</div>`;
+  } else if(itemType === 'individual' && (finalizedOrdersCache[stockItemId] || []).length > 0){
+    // ○（全数）で発注して配送済みになった分
+    const finTxt = (finalizedOrdersCache[stockItemId] || []).map(o => o.mode === '数量' ? `${o.qty || 0}個` : '○（全数）').join('、');
+    statusHtml = `<div class="order-status-note">配送済み：${finTxt}</div>`;
   }
   document.getElementById('order-sheet-status').innerHTML = statusHtml;
 
@@ -674,8 +681,8 @@ function openOrderSheet(stockItemId, itemType, teamId){
     const finList = finalizedOrdersCache[stockItemId] || [];
     const restoreTotal = finList.reduce((sum, o) => sum + restoreQtyFor(o, itemType, row), 0);
     const finLabel = (o) => o.mode === '数量' ? `${o.qty || 0}個` : '○（全数）';
-    // 全部が数量指定の発注なら、戻ってきた個数を入力できる（一部だけ戻った場合用）。○（全数）が混ざる場合は全部戻す
-    const canPartial = restoreTotal > 0 && finList.every(o => o.mode === '数量');
+    // 戻ってきた個数を入力できる（一部だけ戻った場合用。○（全数）の発注も同じ）
+    const canPartial = restoreTotal > 0;
     const qtyRowHtml = canPartial
       ? `<div class="return-qty-row">戻ってきた個数 <input type="number" id="return-qty-input" min="1" max="${restoreTotal}" value="${restoreTotal}"> 個</div>`
       : '';
