@@ -440,15 +440,11 @@ function orderModeLabel(order){
   return order.mode;
 }
 
-// 取消のとき「在庫も戻す」で戻す個数。共通品・個人品の数量指定は発注数、個人品の○（全数）・日付は依頼数量
+// 配送済みの発注を取消すときに在庫へ戻せる個数。個人品は、発注した時に実際に引かれた数（qty_reserved）をそのまま使う（日付の発注は引かれていないので0）
 function restoreQtyFor(order, itemType, stockRow){
   if(!order) return 0;
-  if(itemType === 'common' || order.mode === '数量') return order.qty || 0;
-  const dInfo = stockRow ? dateInfoCache[stockRow.request_item_date_id] : null;
-  if(!(dInfo && dInfo.qty > 0)) return 0;
-  // ○（全数）は「依頼数量のうち、この発注の時点で残っていた分」なので、同じ品目の配送済み数量指定分は差し引く
-  const doneQty = stockRow ? finalizedQtySum(stockRow.id) : 0;
-  return Math.max(0, dInfo.qty - doneQty);
+  if(itemType === 'common') return order.qty || 0;
+  return Number(order.qty_reserved) || 0;
 }
 
 // 確定済みの数量指定の発注の合計（個人依頼品の「残り数量」の計算に使う。DB側の合計チェックと同じ数え方）
@@ -686,7 +682,7 @@ function openOrderSheet(stockItemId, itemType, teamId){
     const qtyRowHtml = canPartial
       ? `<div class="return-qty-row">戻ってきた個数 <input type="number" id="return-qty-input" min="1" max="${restoreTotal}" value="${restoreTotal}"> 個</div>`
       : '';
-    const returnLabel = '戻ってきた' + (!canPartial && restoreTotal > 0 ? '（在庫に' + restoreTotal + '個戻す）' : '');
+    const returnLabel = '戻ってきた' + (restoreTotal === 0 ? '（在庫には戻りません）' : (!canPartial ? '（在庫に' + restoreTotal + '個戻す）' : ''));
     if(hiddenAdminMode){
       // 消えている行：発注欄は出さず、「戻ってきた」だけ
       adminHtml = finList.length
@@ -700,7 +696,7 @@ function openOrderSheet(stockItemId, itemType, teamId){
         if(qtyRowHtml) links.push(qtyRowHtml);
         links.push(`<button class="link-small" onclick="returnItem()">${returnLabel} ▸</button>`);
         finList.forEach(o => {
-          links.push(`<button class="link-small danger" onclick="cancelFinalizedOrder('${o.id}', false)">配送済み${finList.length > 1 ? '（' + finLabel(o) + '）' : ''}を取消・在庫は戻さない</button>`);
+          links.push(`<button class="link-small danger" onclick="cancelFinalizedOrder('${o.id}')">配送済み${finList.length > 1 ? '（' + finLabel(o) + '）' : ''}を取消・在庫は戻さない</button>`);
         });
       }
       links.push(`<button class="link-small danger" onclick="toggleHideStockItem(true)">この品目を非表示にする</button>`);
@@ -992,65 +988,44 @@ async function submitOrder(){
 }
 
 // 確定済みの発注の取消（管理者のみ）。在庫数は自動では戻さない（実物が戻った時は管理者が手で直す）
-async function cancelFinalizedOrder(orderId, restoreStock){
+let orderCancelBusy = false;
+// 取消系の処理中は、ボタンを押せなくする（二重実行の防止）
+function setOrderCancelBusy(flag){
+  orderCancelBusy = flag;
+  document.querySelectorAll('#order-sheet-finalized button').forEach(btn => { btn.disabled = flag; });
+}
+
+// 配送済みの発注を1件取消す（在庫には戻さない）。取消・「発注可能」への戻しはDB関数が1回の流れで行う
+async function cancelFinalizedOrder(orderId){
   if(currentUser.role !== '管理者') return;
+  if(orderCancelBusy) return;
   const { stockItemId, itemType } = orderSheetState;
+  if(itemType !== 'individual') return;
   const stockRow = stockItemsCache.find(r => r.id === stockItemId);
   const target = (finalizedOrdersCache[stockItemId] || []).find(o => o.id === orderId);
   const msgEl = document.getElementById('order-sheet-msg');
   if(!target || !stockRow) return;
 
-  const restoreQty = restoreQtyFor(target, itemType, stockRow);
-  const doRestore = restoreStock === true && restoreQty > 0 && itemType !== 'common';
-  const confirmText = doRestore
-    ? '配送済みの発注（' + orderModeLabel(target) + '）を取消し、在庫に' + restoreQty + '個戻しますか？'
-    : '配送済みの発注（' + orderModeLabel(target) + '）を取消しますか？' + (itemType === 'common' ? '' : '\n在庫には戻しません。');
-  if(!confirm(confirmText)) return;
+  if(!confirm('配送済みの発注（' + orderModeLabel(target) + '）を取消しますか？\n在庫には戻しません。')) return;
 
-  const { error } = await sbClient.from('stock_orders').update({ is_canceled: true }).eq('id', orderId);
+  setOrderCancelBusy(true);
+  const { error } = await sbClient.rpc('return_individual_item', {
+    p_stock_item_id: stockItemId, p_return_qty: 0, p_order_id: orderId, p_unhide: false
+  });
   if(error){
-    msgEl.textContent = '取消に失敗しました：' + error.message;
+    msgEl.textContent = '取消に失敗しました（何も変わっていません）：' + error.message;
+    setOrderCancelBusy(false);
     return;
   }
-  const exFin = historyExtras(stockRow);
-  await logChange('stock_orders', orderId, 'is_canceled', false, true, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
-
-  // 在庫を戻す（管理者が「在庫も戻す」を選んだ時だけ）。個人品だけ（共通品は在庫を自動では戻さず、管理者が補充で調整する）
-  if(doRestore){
-    const { error: restoreErr } = await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: restoreQty });
-    if(restoreErr){
-      alert('発注は取消しましたが、在庫数を戻す処理に失敗しました。在庫数は変わっていません。\n（' + restoreErr.message + '）');
-    }
-  }
-
-  // 個人品：取消したあとに有効な発注が依頼数量に満たなければ、依頼側を「発注可能」に戻す
-  if(itemType === 'individual' && stockRow.request_item_date_id){
-    const dInfo = dateInfoCache[stockRow.request_item_date_id];
-    const others = [
-      ...(finalizedOrdersCache[stockItemId] || []).filter(o => o.id !== orderId),
-      ...(ordersCache[stockItemId] || [])
-    ];
-    const hasFullOrder = others.some(o => o.mode !== '数量');
-    const othersQty = others.filter(o => o.mode === '数量').reduce((sum, o) => sum + (o.qty || 0), 0);
-    if(!hasFullOrder && (!dInfo || !dInfo.qty || othersQty < dInfo.qty)){
-      const { error: revertErr } = await sbClient
-        .from('request_item_dates')
-        .update({ status: '発注可能' })
-        .eq('id', stockRow.request_item_date_id)
-        .eq('status', '発注済み・受取待ち');
-      if(!revertErr){
-        await logChange('request_item_dates', stockRow.request_item_date_id, 'status', '発注済み・受取待ち', '発注可能', stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
-      }
-    }
-  }
-
+  setOrderCancelBusy(false);
   closeOrderSheet();
   await loadStockItems();
 }
 
-// 「戻ってきた」：配送済みの発注を取消し、在庫に戻し、消えていた行を表に戻す（管理者のみ・個人品のみ）
+// 「戻ってきた」：配送済みの発注を全部取消し、入力した個数を在庫に戻し、消えていた行を表に戻す（管理者のみ・個人品のみ）。全部DB関数が1回の流れで行う
 async function returnItem(){
   if(currentUser.role !== '管理者') return;
+  if(orderCancelBusy) return;
   const { stockItemId, itemType } = orderSheetState;
   if(itemType !== 'individual') return;
   const stockRow = stockItemsCache.find(r => r.id === stockItemId);
@@ -1074,63 +1049,26 @@ async function returnItem(){
     returnQty = n;
   }
   msgEl.textContent = '';
-  const confirmText = '配送済みの発注を取消し、在庫に' + returnQty + '個戻します。'
-    + (returnQty < restoreTotal ? '\n残り' + (restoreTotal - returnQty) + '個は配送先に残った扱いです（在庫には入りません）。' : '')
+  const confirmText = (returnQty > 0
+      ? '配送済みの発注を取消し、在庫に' + returnQty + '個戻します。'
+      : '配送済みの発注を取消します（在庫には戻りません）。')
+    + (returnQty > 0 && returnQty < restoreTotal ? '\n残り' + (restoreTotal - returnQty) + '個は配送先に残った扱いです（在庫には入りません）。' : '')
     + (willUnhide ? '\n消えている行も表に戻します。' : '')
     + '\nよろしいですか？';
   if(!confirm(confirmText)) return;
 
-  const exFin = historyExtras(stockRow);
-  let restoreFailed = false;
-  let remainingReturn = returnQty;
-  for(const o of finList){
-    const { error } = await sbClient.from('stock_orders').update({ is_canceled: true }).eq('id', o.id);
-    if(error){
-      msgEl.textContent = '取消に失敗しました：' + error.message;
-      await loadStockItems();
-      return;
-    }
-    await logChange('stock_orders', o.id, 'is_canceled', false, true, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
-    const q = Math.min(remainingReturn, restoreQtyFor(o, itemType, stockRow));
-    if(q > 0){
-      remainingReturn -= q;
-      const { error: restoreErr } = await sbClient.rpc('restore_individual_stock_qty', { p_stock_item_id: stockItemId, p_qty: q });
-      if(restoreErr){ restoreFailed = true; console.error('[戻ってきた] 在庫戻し失敗:', restoreErr.message); }
-    }
+  setOrderCancelBusy(true);
+  const { error } = await sbClient.rpc('return_individual_item', {
+    p_stock_item_id: stockItemId, p_return_qty: returnQty, p_order_id: null, p_unhide: willUnhide
+  });
+  if(error){
+    msgEl.textContent = '失敗しました（何も変わっていません）：' + error.message;
+    setOrderCancelBusy(false);
+    return;
   }
-
-  if(willUnhide){
-    const { error: hideErr } = await sbClient.from('stock_items').update({ is_hidden: false, hidden_at: null }).eq('id', stockItemId);
-    if(hideErr){
-      alert('発注の取消までは完了しましたが、非表示の解除に失敗しました。\n（' + hideErr.message + '）');
-    } else {
-      await logChange('stock_items', stockItemId, 'is_hidden', true, false, stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
-    }
-  }
-
-  // 取消したあとに有効な発注が依頼数量に満たなければ、依頼側を「発注可能」に戻す（cancelFinalizedOrderと同じ判定）
-  if(stockRow.request_item_date_id){
-    const dInfo = dateInfoCache[stockRow.request_item_date_id];
-    const others = [...(ordersCache[stockItemId] || [])];
-    const hasFullOrder = others.some(o => o.mode !== '数量');
-    const othersQty = others.filter(o => o.mode === '数量').reduce((sum, o) => sum + (o.qty || 0), 0);
-    if(!hasFullOrder && (!dInfo || !dInfo.qty || othersQty < dInfo.qty)){
-      const { error: revertErr } = await sbClient
-        .from('request_item_dates')
-        .update({ status: '発注可能' })
-        .eq('id', stockRow.request_item_date_id)
-        .eq('status', '発注済み・受取待ち');
-      if(!revertErr){
-        await logChange('request_item_dates', stockRow.request_item_date_id, 'status', '発注済み・受取待ち', '発注可能', stockRow.item_name, undefined, undefined, exFin.requesterName, exFin.deliveryDate, exFin.sizeTxt);
-      }
-    }
-  }
-
+  setOrderCancelBusy(false);
   closeOrderSheet();
   await loadStockItems();
-  if(restoreFailed){
-    alert('発注は取消しましたが、在庫を戻す処理に失敗したものがあります。在庫数を確認してください。');
-  }
 }
 
 async function cancelOrder(){
@@ -1441,7 +1379,7 @@ async function loadStockItems(){
   // 確定済み（取消されていない）発注：残り数量の計算と、管理者の確定後の取消に使う
   const { data: finOrders, error: finErr } = await sbClient
     .from('stock_orders')
-    .select('id, stock_item_id, team_id, operated_by_name, mode, qty, desired_date, is_proxy')
+    .select('id, stock_item_id, team_id, operated_by_name, mode, qty, desired_date, is_proxy, qty_reserved')
     .eq('is_canceled', false)
     .eq('is_finalized', true)
     .order('created_at', { ascending: true });
