@@ -992,7 +992,7 @@ async function loadMyItems(){
     });
 
   // 発注済み・受取待ちのうち、配送済みになったものは一覧から除外する
-  const orderedIds = myItems.filter(r => r.status === '発注済み・受取待ち').map(r => r.id);
+  const orderedIds = myItems.filter(r => r.status === '発注済み・受取待ち' && !r.canceled_at).map(r => r.id); // 取消済みの依頼は、確定・配送済みの判定の対象外（あまり箱への他人の発注で、取消線の行が消えたり「確定済み」が付いたりしないように）
   if(orderedIds.length){
     const deliveredDateIds = await getDeliveredDateIds(orderedIds);
     const finalizedDateIds = await getFinalizedDateIds(orderedIds);
