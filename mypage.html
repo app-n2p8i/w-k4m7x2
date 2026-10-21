@@ -1004,7 +1004,7 @@ async function loadMyItems(){
   }
 
   // 発注可能なもののうち、部分発注（数量モード）で一部だけ発注済みのものの進捗を取得
-  const readyIds = myItems.filter(r => r.status === '発注可能').map(r => r.id);
+  const readyIds = myItems.filter(r => r.status === '発注可能' && !r.canceled_at).map(r => r.id); // 取消済みの依頼は対象外（あまり箱への他人の発注を表示しない）
   if(readyIds.length){
     const { data: stockRows2 } = await sbClient
       .from('stock_items')
