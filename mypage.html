@@ -255,6 +255,7 @@ body{
         <div class="sheet-note" id="order-sheet-msg"></div>
 
         <button class="sheet-confirm" id="order-confirm-btn" onclick="submitOrderFromMypage()">この内容で発注する</button>
+        <button class="sheet-cancel-link" id="order-sheet-cancel-order-btn" style="display:none" onclick="cancelOpenOrdersFromOrderSheet()">発注済みの分（確定前）を取消す</button>
         <button class="sheet-cancel-link" onclick="cancelRequestItem()">この納入日の依頼を取り消す</button>
         <button class="sheet-close" onclick="closeOrderSheet()">閉じる</button>
       </div>
@@ -665,6 +666,7 @@ async function openOrderSheet(dateRowId){
 
   orderSheetState.sumQtyAll = sumQtyAll;
   orderSheetState.openOrderIds = openOrders.map(o => o.id);
+  document.getElementById('order-sheet-cancel-order-btn').style.display = openOrders.length ? 'block' : 'none';
   if(openQtyOrder){
     // 確定前の数量発注があれば、そこに積み増す
     orderSheetState.existingOrderId = openQtyOrder.id;
@@ -816,8 +818,72 @@ async function submitOrderFromMypage(){
   await loadMyItems();
 }
 
+// 指定した納入日の「確定前・取消前」の発注をすべて取消す（在庫はDB側で自動で戻る）
+// 戻り値：{ ok, count, msg }。確定済みの発注には触れない
+async function cancelOpenOrdersForDate(dateRowId){
+  const { data: stockRow, error: stockErr } = await sbClient
+    .from('stock_items')
+    .select('id')
+    .eq('request_item_date_id', dateRowId)
+    .maybeSingle();
+  if(stockErr) return { ok:false, count:0, msg:'在庫データの取得に失敗しました：' + stockErr.message };
+  if(!stockRow) return { ok:true, count:0, msg:'' };
+
+  const { data: orders, error: ordErr } = await sbClient
+    .from('stock_orders')
+    .select('id, is_finalized')
+    .eq('stock_item_id', stockRow.id)
+    .eq('is_canceled', false);
+  if(ordErr) return { ok:false, count:0, msg:'発注データの取得に失敗しました：' + ordErr.message };
+
+  const targets = (orders || []).filter(o => !o.is_finalized);
+  let done = 0;
+  for(const o of targets){
+    const { error: cErr } = await sbClient.rpc('cancel_stock_order', { order_id: o.id });
+    if(cErr) return { ok:false, count:done, msg:'発注の取消に失敗しました：' + cErr.message };
+    done++;
+  }
+  return { ok:true, count:done, msg:'' };
+}
+
+// 発注シートの「発注済みの分（確定前）を取消す」：依頼は残し、確定前の発注だけ取消す
+async function cancelOpenOrdersFromOrderSheet(){
+  const msgEl = document.getElementById('order-sheet-msg');
+  if(isLocked){ msgEl.textContent = 'ただいまロック中のため、発注の取消はできません。'; return; }
+  if(!confirm('確定前の発注をすべて取消しますか？依頼自体は残ります。')) return;
+
+  const dateRowId = orderSheetState.dateRowId;
+  const r_oc = myItems.find(r => r.id === dateRowId);
+  const res = await cancelOpenOrdersForDate(dateRowId);
+  if(!res.ok){ msgEl.textContent = res.msg; await loadMyItems(); return; }
+
+  const { error: statusErr } = await sbClient
+    .from('request_item_dates')
+    .update({ status: '発注可能' })
+    .eq('id', dateRowId);
+  if(statusErr){
+    msgEl.textContent = '発注の取消はできましたが、状態更新に失敗しました：' + statusErr.message;
+    return;
+  }
+
+  document.getElementById('order-sheet-overlay').classList.remove('show');
+  await loadMyItems();
+}
+
 async function cancelRequestItem(){
-  if(!confirm('この納入日の依頼を取り消しますか？取消後も本日中は依頼一覧に取消線付きで表示されます。')) return;
+  if(isLocked && (orderSheetState.openOrderIds || []).length){
+    document.getElementById('order-sheet-msg').textContent = 'ただいまロック中のため、発注済みの分がある依頼は取消できません。';
+    return;
+  }
+  if(!confirm('この納入日の依頼を取り消しますか？確定前の発注があれば、あわせて取消されます。取消後も本日中は依頼一覧に取消線付きで表示されます。')) return;
+
+  // 先に、確定前の発注を取消す（在庫が戻る）。失敗したら依頼の取消は行わない
+  const orderRes = await cancelOpenOrdersForDate(orderSheetState.dateRowId);
+  if(!orderRes.ok){
+    document.getElementById('order-sheet-msg').textContent = orderRes.msg;
+    await loadMyItems();
+    return;
+  }
 
   const { error } = await sbClient
     .from('request_item_dates')
