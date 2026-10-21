@@ -368,6 +368,29 @@ function historyExtras(stockRow){
     sizeTxt: sizeTxt || null
   };
 }
+// あまり箱：依頼が取消済みの個人品（最終的な判定はDBが行う。画面は表示と操作の出し分けだけに使う）
+function isSurplusRow(row){
+  if(!row || row.item_type !== 'individual' || !row.request_item_date_id) return false;
+  const di = dateInfoCache[row.request_item_date_id];
+  return !!(di && di.canceled_at);
+}
+// 依頼者欄に出す名前：あまり箱は、取消されていない確定前の発注の配送先だけから決める。なければ「あまり箱」
+function requesterLabelFor(row){
+  if(!isSurplusRow(row)) return row.requester_name || '';
+  const o = (ordersCache[row.id] || [])[0];
+  if(o && o.recipient_name) return o.recipient_name + (o.is_proxy ? '（代理）' : '');
+  return 'あまり箱';
+}
+// 管理者が代理発注で選ぶ「依頼者」の一覧（許可リストの依頼者ロールだけ）
+let requesterNamesCache = null;
+async function loadRequesterNames(){
+  if(requesterNamesCache) return requesterNamesCache;
+  const { data, error } = await sbClient.from('users_allowlist').select('name').eq('role', '依頼者').order('name', { ascending: true });
+  if(error){ return null; }
+  requesterNamesCache = (data || []).map(r => r.name).filter(Boolean);
+  return requesterNamesCache;
+}
+
 let stockItemsCache = [];   // stock_items 全件
 let finalizedOrdersCache = {}; // stock_item_id -> 確定済み（取消されていない）発注の配列
 let ordersCache = {};       // stock_item_id -> 有効な注文の配列（共通品は班ごとに複数件持ちうる）
@@ -494,7 +517,8 @@ function renderIndividualTable(rows){
     const mark = (row.delivery_marks || {}).individual || '';
     const deliveredLocked = mark === 'delivered' && currentUser.role !== '管理者';
     const deliveryModeActive = deliveryModeOn && canMarkDelivery();
-    const clickable = deliveryModeActive ? !!(order || mark) : (canOperate && (isSelfItem || currentUser.role === '管理者') && !blocked && !deliveredLocked);
+    const surplusRow = isSurplusRow(row);
+    const clickable = deliveryModeActive ? !!(order || mark) : (canOperate && (isSelfItem || surplusRow || currentUser.role === '管理者') && !blocked && !deliveredLocked);
 
     const fieldClass = order ? (order.mode === '日付' ? 'date-mode' : '') : 'empty';
     const isCircle = order && order.mode === '○';
@@ -529,7 +553,7 @@ function renderIndividualTable(rows){
           <div class="ir-size">${escapeHtml(sizeText)}</div>
         </div>
         <div class="ir-qty">${row.stock_qty ?? 0}</div>
-        <div class="ir-requester">${escapeHtml(row.requester_name || '')}</div>
+        <div class="ir-requester">${escapeHtml(requesterLabelFor(row))}</div>
       </div>`;
   }).join('');
 
@@ -615,7 +639,7 @@ let orderSheetState = { stockItemId: null, itemType: null, teamId: null, existin
 
 let savedScrollY = 0;
 
-function openOrderSheet(stockItemId, itemType, teamId){
+async function openOrderSheet(stockItemId, itemType, teamId){
   const row = stockItemsCache.find(r => r.id === stockItemId);
   if(!row) return;
 
@@ -632,7 +656,7 @@ function openOrderSheet(stockItemId, itemType, teamId){
   let sub = '';
   if(itemType === 'individual'){
     const sizeText = [row.size_l, row.size_w, row.size_h].filter(v=>v!=null).join('×');
-    sub = `${sizeText}${dateInfo ? '　納入日：' + dateInfo.delivery_date : ''}　依頼者：${row.requester_name || ''}`;
+    sub = `${sizeText}${dateInfo ? '　納入日：' + dateInfo.delivery_date : ''}　依頼者：${requesterLabelFor(row)}`;
   } else {
     const team = teams.find(t => t.id === teamId);
     sub = team ? team.team_name : '';
@@ -651,7 +675,8 @@ function openOrderSheet(stockItemId, itemType, teamId){
   let statusHtml = '';
   if(existing){
     const proxyTag = existing.is_proxy ? '（代理）' : '';
-    statusHtml = `<div class="order-status-note${existing.is_proxy?' proxy':''}">現在：${escapeHtml(orderModeLabel(existing))}　${escapeHtml(existing.operated_by_name)}さん${proxyTag}</div>`;
+    const whoName = (itemType === 'individual' && isSurplusRow(row) && existing.recipient_name) ? existing.recipient_name : existing.operated_by_name;
+    statusHtml = `<div class="order-status-note${existing.is_proxy?' proxy':''}">現在：${escapeHtml(orderModeLabel(existing))}　${escapeHtml(whoName)}さん${proxyTag}</div>`;
     const finQtyNow = itemType === 'individual' ? finalizedQtySum(stockItemId) : 0;
     if(itemType === 'individual' && existing.mode === '数量' && orderSheetState.totalQty && existing.qty + finQtyNow < orderSheetState.totalQty){
       statusHtml += `<div class="order-status-note">これまでに${existing.qty + finQtyNow}個発注済み。残り${orderSheetState.totalQty - existing.qty - finQtyNow}個です（部分発注）。</div>`;
@@ -709,7 +734,11 @@ function openOrderSheet(stockItemId, itemType, teamId){
   const markKey = itemType === 'individual' ? 'individual' : teamId;
   const mark = (row.delivery_marks || {})[markKey] || '';
   const deliveredLocked = mark === 'delivered' && currentUser.role !== '管理者';
-  const canEdit = canOperate && !blocked && !deliveredLocked && (itemType === 'common' || isSelfItem || currentUser.role === '管理者');
+  const surplusSheet = itemType === 'individual' && isSurplusRow(row);
+  // あまり箱：依頼者は、まだ発注がないか、自分が出した発注のときだけ操作できる（管理者は全部可）。最終的にはDBも同じ確認をする
+  const surplusOtherOrder = surplusSheet && existing && currentUser.role !== '管理者' && existing.operated_by_email !== currentUser.email;
+  const canEdit = canOperate && !blocked && !deliveredLocked && !surplusOtherOrder && (itemType === 'common' || isSelfItem || surplusSheet || currentUser.role === '管理者');
+  orderSheetState.surplus = surplusSheet;
 
   if(hiddenAdminMode){
     document.getElementById('order-sheet-form').innerHTML = '';
@@ -762,7 +791,17 @@ function openOrderSheet(stockItemId, itemType, teamId){
             </label>`).join('')}
         </div>
       </div>` : '';
+    let recipientRowHtml = '';
+    if(surplusSheet && currentUser.role === '管理者'){
+      const names = await loadRequesterNames();
+      const preset = (existing && existing.recipient_name) ? existing.recipient_name : '';
+      recipientRowHtml = names
+        ? `<div class="field-group"><label class="field-label">頼んだ依頼者（必須）</label>
+             <select id="order-recipient-select"><option value="">選んでください</option>${names.map(n => `<option value="${escapeHtml(n)}" ${n === preset ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select></div>`
+        : `<div class="view-only-note">依頼者の一覧を取得できないため、代理発注はできません</div>`;
+    }
     document.getElementById('order-sheet-form').innerHTML = `
+      ${recipientRowHtml}
       ${modeRowHtml}
       <div class="field-group" id="order-qty-group" style="display:${qtyGroupVisible ? '' : 'none'}">
         <label class="field-label">${qtyLabelText}</label>
@@ -787,7 +826,8 @@ function openOrderSheet(stockItemId, itemType, teamId){
     document.getElementById('order-sheet-form').innerHTML = '';
     document.getElementById('order-sheet-viewonly').innerHTML = isViewOnly
       ? `<div class="view-only-note">閲覧のみです（発注操作はできません）</div>`
-      : (deliveredLocked ? `<div class="view-only-note">配送済みのため操作できません</div>`
+      : (surplusOtherOrder ? `<div class="view-only-note">他の人が発注済みのため、操作できません</div>`
+      : deliveredLocked ? `<div class="view-only-note">配送済みのため操作できません</div>`
       : (blocked ? `<div class="view-only-note">ただいまロック中のため操作できません</div>` : ''));
   }
 
@@ -860,7 +900,15 @@ async function submitOrder(){
 
   const stockRow = stockItemsCache.find(r => r.id === stockItemId);
   const isSelfItem = itemType === 'individual' && stockRow && stockRow.requester_name === currentUser.name;
-  const isProxy = itemType === 'individual' ? !isSelfItem : false;
+  const surplusSubmit = itemType === 'individual' && isSurplusRow(stockRow);
+  // あまり箱：本人の発注は代理ではない。管理者の発注だけ代理（最終的にはDBが決める）
+  const isProxy = itemType === 'individual' ? (surplusSubmit ? currentUser.role === '管理者' : !isSelfItem) : false;
+  let recipientName = null;
+  if(surplusSubmit && currentUser.role === '管理者'){
+    const sel = document.getElementById('order-recipient-select');
+    recipientName = sel ? sel.value : '';
+    if(!recipientName){ msgEl.textContent = '頼んだ依頼者を選んでください。'; return; }
+  }
   const exOrder = historyExtras(stockRow);
 
   if(mode === '数量' && !isCommon && totalQty){
@@ -933,6 +981,7 @@ async function submitOrder(){
       qty: qty,
       desired_date: desiredDate,
       is_proxy: isProxy,
+      ...(recipientName ? { recipient_name: recipientName } : {}),
       is_canceled: false,
       is_first_wave: isFirstWave,
       color_id: colorId
@@ -972,7 +1021,7 @@ async function submitOrder(){
   // 共通品の在庫の増減は、DB側の自動処理（発注の登録・数量変更・取消）が行う。画面からは在庫を直接増減しない
 
   // 個人品・数量モードは、依頼の合計数量に達するまで依頼側を「発注可能」のまま残す（部分発注）
-  if(itemType === 'individual' && dateRowId){
+  if(itemType === 'individual' && dateRowId && !surplusSubmit){
     const newStatus = (mode === '数量' && totalQty && (cumulativeQty + finalizedQtySum(stockItemId)) < totalQty) ? '発注可能' : '発注済み・受取待ち';
     const { error: stErr } = await sbClient.from('request_item_dates').update({ status: newStatus }).eq('id', dateRowId);
     if(!stErr){
@@ -1089,7 +1138,7 @@ async function cancelOrder(){
   // 共通品の在庫は、取消した時にDB側の自動処理が戻す
 
   // 個人品の場合、依頼側のステータスを「発注可能」に戻す（マイページに反映させるため）
-  if(itemType === 'individual' && stockRowCheck && stockRowCheck.request_item_date_id){
+  if(itemType === 'individual' && stockRowCheck && stockRowCheck.request_item_date_id && !isSurplusRow(stockRowCheck)){
     const { error: revertErr } = await sbClient
       .from('request_item_dates')
       .update({ status: '発注可能' })
@@ -1319,12 +1368,13 @@ async function loadStockItems(){
   if(dateIds.length){
     const { data: dateRows } = await sbClient
       .from('request_item_dates')
-      .select('id, delivery_date, qty, request_items ( is_urgent, team_master ( team_abbr ) )')
+      .select('id, delivery_date, qty, canceled_at, request_items ( is_urgent, team_master ( team_abbr ) )')
       .in('id', dateIds);
     (dateRows || []).forEach(d => {
       dateInfoCache[d.id] = {
         delivery_date: d.delivery_date,
         qty: d.qty,
+        canceled_at: d.canceled_at,
         is_urgent: !!(d.request_items && d.request_items.is_urgent),
         team_abbr: (d.request_items && d.request_items.team_master && d.request_items.team_master.team_abbr) || ''
       };
@@ -1333,7 +1383,7 @@ async function loadStockItems(){
 
   const { data: orders, error: ordersErr } = await sbClient
     .from('stock_orders')
-    .select('id, stock_item_id, team_id, operated_by_email, operated_by_name, destination, mode, qty, desired_date, is_proxy, is_first_wave, color_id')
+    .select('id, stock_item_id, team_id, operated_by_email, operated_by_name, destination, recipient_name, mode, qty, desired_date, is_proxy, is_first_wave, color_id')
     .eq('is_canceled', false)
     .eq('is_finalized', false)
     .order('created_at', { ascending: true });
@@ -1487,7 +1537,7 @@ function openDeleteSheet(stockItemId){
   document.getElementById('delete-sheet-detail').innerHTML = `
     <div class="detail-line"><b>品名</b>${teamBadge}${escapeHtml(displayItemName(row.item_name))}</div>
     <div class="detail-line"><b>サイズ</b>${escapeHtml(sizeText)}</div>
-    <div class="detail-line"><b>依頼者</b>${escapeHtml(row.requester_name || '（不明）')}</div>
+    <div class="detail-line"><b>依頼者</b>${escapeHtml(requesterLabelFor(row) || '（不明）')}</div>
     <div class="detail-line"><b>在庫数</b>${row.stock_qty ?? 0}</div>`;
   document.getElementById('delete-sheet-msg').textContent = '';
   document.getElementById('delete-sheet-overlay').classList.add('show');
