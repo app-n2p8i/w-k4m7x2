@@ -306,7 +306,7 @@ const SUPABASE_URL = 'https://tguqfgdodevwowydkrkq.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_OH2iHpq9DIukdzNMUR0lyw_sfVyATp6';
 const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-let currentUser = { email: '', name: '', role: '', can_mark_delivery: false };
+let currentUser = { email: '', name: '', role: '', can_mark_delivery: false, team: null };
 let deliveryModeOn = false;
 let showHiddenIndividual = false;
 
@@ -601,7 +601,9 @@ function renderCommonTable(rows){
       const mark = (row.delivery_marks || {})[team.id] || '';
       const deliveredLocked = mark === 'delivered' && currentUser.role !== '管理者';
       const deliveryModeActive = deliveryModeOn && canMarkDelivery();
-      const canOperate = deliveryModeActive ? !!(order || mark) : ((currentUser.role === '依頼者' || currentUser.role === '管理者') && !blocked && !deliveredLocked);
+      // 依頼者は、自分の班の欄だけ操作できる（管理者は全班）。班が未設定の依頼者は操作できない
+      const teamOk = currentUser.role === '管理者' || currentUser.team === team.id;
+      const canOperate = deliveryModeActive ? !!(order || mark) : ((currentUser.role === '依頼者' || currentUser.role === '管理者') && teamOk && !blocked && !deliveredLocked);
       const fieldClass = order ? '' : 'empty';
       const isCircle = order && order.mode === '○';
       const fieldLabel = order ? (order.mode === '数量' ? order.qty : (order.mode === '日付' ? (order.desired_date ? order.desired_date.slice(5).replace('-', '/') : '日') : '○')) : 'ー';
@@ -1623,7 +1625,7 @@ async function initAuth(){
 
   const { data: allowRow, error: allowErr } = await sbClient
     .from('users_allowlist')
-    .select('name, role, can_mark_delivery')
+    .select('name, role, can_mark_delivery, team')
     .eq('email', user.email)
     .maybeSingle();
 
@@ -1637,6 +1639,7 @@ async function initAuth(){
   currentUser.name = allowRow.name;
   currentUser.role = allowRow.role;
   currentUser.can_mark_delivery = allowRow.can_mark_delivery === true;
+  currentUser.team = allowRow.team || null;
 
   document.getElementById('login-name-display').textContent = currentUser.name;
   document.getElementById('auth-loading').style.display='none';
