@@ -770,7 +770,15 @@ async function submitUser(){
 
 async function updateUserRole(email, role){
   const { error } = await sbClient.from('users_allowlist').update({ role }).eq('email', email);
-  if(error){ alert('役割の変更に失敗しました：' + error.message); await loadUsers(); }
+  if(error){ alert('役割の変更に失敗しました：' + error.message); }
+  await loadUsers();
+}
+
+// 班の変更：teamカラムだけをピンポイントで更新する（行全体は上書きしない）
+async function updateUserTeam(email, teamId){
+  const { error } = await sbClient.from('users_allowlist').update({ team: teamId || null }).eq('email', email);
+  if(error){ alert('班の変更に失敗しました：' + error.message); }
+  await loadUsers();
 }
 
 async function deleteUser(email){
@@ -783,8 +791,14 @@ async function deleteUser(email){
 async function loadUsers(){
   const { data, error } = await sbClient
     .from('users_allowlist')
-    .select('email, name, role')
+    .select('email, name, role, team')
     .order('name');
+
+  const { data: teamRows } = await sbClient
+    .from('team_master')
+    .select('id, team_name, is_hidden, sort_order')
+    .order('sort_order');
+  const teamList = teamRows || [];
 
   const listEl = document.getElementById('user-list');
   const errEl = document.getElementById('user-load-error');
@@ -809,8 +823,21 @@ async function loadUsers(){
         <option value="作業者" ${row.role==='作業者'?'selected':''}>作業者</option>
         <option value="管理者" ${row.role==='管理者'?'selected':''}>管理者</option>
       </select>
+      ${row.role === '依頼者' ? teamSelectHtml(row, teamList) : ''}
       <button class="btn-delete" onclick="deleteUser('${row.email}')">削除</button>
     </div>`).join('');
+}
+
+// 依頼者の班の選択欄（班マスタの表示中の班＋現在の班が非表示の場合はそれも）
+function teamSelectHtml(row, teamList){
+  const opts = ['<option value="">班を選択</option>'];
+  teamList.forEach(t => {
+    if(t.is_hidden && t.id !== row.team) return;
+    const label = t.team_name + (t.is_hidden ? '（非表示）' : '');
+    opts.push(`<option value="${t.id}" ${row.team === t.id ? 'selected' : ''}>${escapeHtml(label)}</option>`);
+  });
+  const unset = !row.team ? ' style="border-color:#c0392b"' : '';
+  return `<select class="role-select"${unset} onchange="updateUserTeam('${row.email}', this.value)">${opts.join('')}</select>`;
 }
 
 // =============================================
