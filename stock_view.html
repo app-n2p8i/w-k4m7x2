@@ -1124,7 +1124,8 @@ async function cancelOrder(){
   }
 
   // 発注を取消したら、対応する配送済み(グレー)表示も一緒に消す（キー単位の更新）
-  if(markCheck){
+  // 管理者だけがここで消す。管理者以外は、cancel_stock_order関数の中でDB側が消す（再読込で反映）
+  if(markCheck && currentUser.role === '管理者'){
     const { error: markErr } = await sbClient.rpc('update_delivery_mark', { p_stock_item_id: stockItemId, p_mark_key: markKeyCheck, p_mark_value: null });
     if(markErr){
       console.error('[delivery_marks] 更新失敗:', markErr.message);
