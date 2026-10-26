@@ -281,10 +281,11 @@ body{
   </div>
 </div>
 
+<script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-const SUPABASE_URL = 'https://tguqfgdodevwowydkrkq.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_OH2iHpq9DIukdzNMUR0lyw_sfVyATp6';
+const SUPABASE_URL = window.APP_CONFIG.SUPABASE_URL;
+const SUPABASE_KEY = window.APP_CONFIG.SUPABASE_KEY;
 const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ★同じ場所（GitHub Pages）に置く前提のURL構成

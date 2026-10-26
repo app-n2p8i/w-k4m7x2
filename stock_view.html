@@ -300,10 +300,11 @@ h1{font-size:18px;font-weight:bold;color:#1a3a5c;border-bottom:2px solid #1a3a5c
   </div>
 </div>
 
+<script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-const SUPABASE_URL = 'https://tguqfgdodevwowydkrkq.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_OH2iHpq9DIukdzNMUR0lyw_sfVyATp6';
+const SUPABASE_URL = window.APP_CONFIG.SUPABASE_URL;
+const SUPABASE_KEY = window.APP_CONFIG.SUPABASE_KEY;
 const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let currentUser = { email: '', name: '', role: '', can_mark_delivery: false, team: null };
