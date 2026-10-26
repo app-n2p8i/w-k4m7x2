@@ -3,7 +3,7 @@
 // 各ページ（HTML）と最低限の静的ファイルだけを端末に保存し、
 // 電波が無い時は直前に取得できた画面をそのまま表示する。
 
-const CACHE_NAME = 'kizabako-shell-v5';
+const CACHE_NAME = 'kizabako-shell-v6';
 const PRECACHE_URLS = [
   './home.html',
   './formB_size.html',
@@ -38,6 +38,22 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
+
+  // 設定ファイル（config.js）：ネット優先・端末のキャッシュを通さず常に最新を取る。
+  // 取得できた時だけ控えを保存し、電波が無い時だけその控えを使う。
+  const reqUrl = new URL(req.url);
+  if (reqUrl.origin === self.location.origin && reqUrl.pathname.endsWith('/config.js')) {
+    event.respondWith(
+      fetch(req, { cache: 'no-store' })
+        .then((res) => {
+          const resClone = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, resClone));
+          return res;
+        })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
 
   const isHtmlRequest = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
 
